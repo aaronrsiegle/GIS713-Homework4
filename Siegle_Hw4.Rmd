@@ -1,0 +1,57 @@
+---
+title: "Siegle-Hw4"
+author: "Aaron_Siegle"
+date: "2026-10-30"
+output: html_document
+---
+
+```{r, message=False}
+# call relevant libraries 
+library(rpart)
+library(randomForest)
+library(ranger)
+library(xgboost)
+library(spdep)
+library(spatialreg)
+library(viridis)
+library(data.table)
+library(spectralGP)
+library(RColorBrewer)
+library(spgwr)
+```
+
+```{r}
+# Set seed for the script 
+set.seed(42)
+```
+
+```{r}
+# Load in the data 
+path <- "Data/train.csv"
+df <- fread(path)
+df
+```
+```{r}
+# Initial data cleaning
+colSums(is.na(df))
+df[is.na(Age), Age := df[, median(Age, na.rm=T)]] 
+df[, lapply(.SD, class)]
+df[, Survived := as.factor(Survived)]
+df[, Sex := as.factor(Sex)]
+df[, Embarked := as.factor(Embarked)]
+```
+
+
+
+```{r}
+# Question 1: Partition your data into an 80/20 train/test split. For all model fitting exercises, train/fit the model on the reserved 80% and validate on the reserved 20%
+n <- nrow(df)
+train_idx <- sample(seq_len(n), size = floor(0.80 * n))
+
+train_data <- df[train_idx, , drop = FALSE]
+test_data  <- df[-train_idx, , drop = FALSE]
+
+nrow(train_data)
+nrow(test_data)
+```
+
