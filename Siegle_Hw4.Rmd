@@ -5,10 +5,11 @@ date: "2026-10-30"
 output: html_document
 ---
 
-```{r, message=False}
+```{r, message=FALSE}
 # call relevant libraries 
 library(rpart)
 library(randomForest)
+library(randomForestExplainer)
 library(ranger)
 library(xgboost)
 library(spdep)
@@ -53,5 +54,204 @@ test_data  <- df[-train_idx, , drop = FALSE]
 
 nrow(train_data)
 nrow(test_data)
+```
+
+```{r}
+# Question 2: We’ll first fit a baseline model that isn’t “machine learning” (according to most people). Fit a multiple regression model that predicts titanic survivorship. Report the effects, their standard errors, and the overall accuracy of the model. Note: you must do logistic regression for this because the output is alive/dead or 1/0.
+
+titanic_log <- glm(Survived ~ Pclass + Age + Fare, 
+                   data = train_data, 
+                   family = "binomial")
+summary(titanic_log)
+
+```
+
+```{r}
+# Predicted survival probability
+probs <- predict(titanic_log, newdata = test_data, type = "response")
+head(probs)
+
+mean(probs, na.rm = TRUE)
+```
+
+```{r}
+# Model p-value
+with(titanic_log,
+     pchisq(null.deviance - deviance,
+            df.null - df.residual,
+            lower.tail = FALSE))
+```
+
+```{r}
+# Accuracy of the predictions on the test set
+pred_class <- ifelse(probs > 0.5, 1, 0)
+
+table(Predicted = pred_class, Actual = test_data$Survived)   
+mean(pred_class == test_data$Survived, na.rm = TRUE)          
+
+```
+
+```{r, warning=FALSE}
+# Question 3: Fit a RF model to describe survivorship 
+train_data$Survived <- as.factor(train_data$Survived)
+test_data$Survived  <- as.factor(test_data$Survived)
+
+p        <- ncol(train_data) - 1          # number of predictors
+mtry_set <- 1:min(5, p)              # mtry values to try
+ntree    <- 1000
+
+oob_mat <- matrix(NA, nrow = ntree, ncol = length(mtry_set),
+                  dimnames = list(NULL, paste0("mtry=", mtry_set)))
+rf_list <- list()
+
+for (m in mtry_set) {
+  rf <- randomForest(Survived ~ Pclass + Age + Fare, data = train_data,
+                     ntree = ntree, mtry = m, importance = TRUE)
+  rf_list[[as.character(m)]] <- rf
+  oob_mat[, paste0("mtry=", m)] <- rf$err.rate[, "OOB"]
+}
+```
+
+```{r}
+# OOB error vs number of tree
+matplot(1:ntree, oob_mat, type = "l", lty = 1, col = seq_along(mtry_set),
+        xlab = "Number of trees", ylab = "OOB error rate",
+        main = "OOB error vs. number of trees")
+legend("topright", colnames(oob_mat), col = seq_along(mtry_set),
+       lty = 1, bty = "n")
+```
+
+```{r}
+# final OOB error vs mtry
+final_oob <- oob_mat[ntree, ]
+plot(mtry_set, final_oob, type = "b", pch = 19,
+     xlab = "mtry (variables tried at each split)", ylab = "OOB error rate",
+     main = "OOB error vs. mtry")
+```
+
+
+
+```{r}
+# Choose the best model and report model accuracy
+best_m  <- mtry_set[which.min(final_oob)]
+best_rf <- rf_list[[as.character(best_m)]]
+best_rf   
+```
+
+```{r, warning=FALSE}
+# Variable Importance Plots 
+plot_min_depth_distribution(best_rf)
+plot_multi_way_importance(best_rf)
+```
+These plot show that the model works because it visualize how the model is influenced by the effects of a particular variable. We also see a clear negative correlation between the number of times that a variable is used to split the root node (times_a_root) and the average depth of the node closest to the root of the tree (mean_min_depth). The lower mean_min_root values indicate that a variable is more important as this variable can be used to split large portions of the dataset early on in the tree. It makes sense that the more influential variables are used by the model more often and thus are more effective as splitting the data. The trend between these factors suggests that the model is working as expected.
+
+```{r}
+# Compare OOB error with the error on the test data
+pred     <- predict(best_rf, test_data)
+test_acc <- mean(pred == test_data$Survived)
+oob_acc  <- 1 - tail(best_rf$err.rate[, "OOB"], 1)
+```
+
+```{r}
+# Make the confusion matrix 
+table(Predicted = pred, Observed = test_data$Survived)   
+data.frame(OOB_accuracy = oob_acc, Test_accuracy = test_acc)
+```
+Yes, Breiman was right because the OOB accuracy (70.3%) is relatively close to the test accuracy (76.5%). This is because Breiman believed that the OOB accuracy is the most unbiased estimator on the accuracy of the model when applied to the testing data. Since the OOB accuracy is roughly 6 percentage points away from the test accuracy, we can argue that Breiman was right about the nature of the OOB accuracy as an unbiased estimator. 
+
+```{r}
+# Question 4: Now fit an XGBoost model to do the same 
+predictors <- c("Pclass", "Age", "Fare")
+pclass_levels <- sort(unique(as.character(train_data$Pclass)))
+
+# Build a numeric matrix
+make_X <- function(d) {
+  d <- as.data.frame(d)[, predictors]
+  d$Pclass <- as.integer(factor(as.character(d$Pclass), levels = pclass_levels))
+  as.matrix(d)
+}
+
+X_c <- make_X(train_data)
+y_c <- as.numeric(as.character(train_data$Survived))   
+X_t <- make_X(test_data)
+y_t <- as.numeric(as.character(test_data$Survived))
+
+dtrain <- xgb.DMatrix(X_c, label = y_c)
+dtest  <- xgb.DMatrix(X_t, label = y_t)
+```
+
+```{r}
+# Tuning grid
+learn_rate <- c(0.1, 0.2, 0.5, 1)
+reg_param  <- c(0.1, 1, 2, 5)
+nmax       <- 1000                       # max number of boosted trees
+
+tune   <- expand.grid(eta = learn_rate, lambda = reg_param)
+curves <- matrix(NA, nrow = nmax, ncol = nrow(tune))   # CV error per round
+
+for (i in seq_len(nrow(tune))) {
+  params <- list(objective = "binary:logistic", eval_metric = "error",
+                 eta = tune$eta[i], lambda = tune$lambda[i],
+                 max_depth = 3, subsample = 0.8, colsample_bytree = 0.8,
+                 min_child_weight = 1, nthread = 2)
+  cv <- xgb.cv(params, dtrain, nrounds = nmax, nfold = 5, verbose = 0)
+  curves[, i] <- cv$evaluation_log$test_error_mean
+}
+
+tune$best_nrounds <- apply(curves, 2, which.min)
+tune$cv_error     <- apply(curves, 2, min)
+tune[order(tune$cv_error), ]              
+```
+
+```{r}
+# CV error vs. number of trees - hold lambda constant 
+sel <- which(tune$lambda == 1)
+matplot(curves[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
+        xlab = "Number of boosted trees (log scale)", ylab = "5-fold CV error",
+        main = "CV error vs. trees, by eta (lambda = 1)")
+legend("topright", paste("eta =", tune$eta[sel]), col = seq_along(sel),
+       lty = 1, bty = "n")
+```
+
+```{r}
+# CV error vs. number of trees - one line per lambda (at the best eta)
+best     <- tune[which.min(tune$cv_error), ]
+sel      <- which(tune$eta == best$eta)
+matplot(curves[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
+        xlab = "Number of boosted trees (log scale)", ylab = "5-fold CV error",
+        main = paste0("CV error vs. trees, by lambda (eta = ", best$eta, ")"))
+legend("topleft", paste("lambda =", tune$lambda[sel]), col = seq_along(sel),
+       lty = 1, bty = "n")
+```
+
+```{r}
+# Best CV error for every eta x lambda combination
+err_mat <- tapply(tune$cv_error, list(tune$eta, tune$lambda), identity)
+matplot(learn_rate, err_mat, type = "b", pch = 19, lty = 1,
+        col = seq_along(reg_param),
+        xlab = "eta (learning rate)", ylab = "Minimum CV error",
+        main = "Minimum CV error by eta and lambda")
+legend("bottomright", paste("lambda =", reg_param), col = seq_along(reg_param),
+       pch = 19, bty = "n")
+```
+
+```{r}
+# Final model and accuracy 
+params_best <- list(objective = "binary:logistic", eval_metric = "error",
+                    eta = best$eta, lambda = best$lambda,
+                    max_depth = 3, subsample = 0.8, colsample_bytree = 0.8,
+                    min_child_weight = 1, nthread = 2)
+bst <- xgb.train(params_best, dtrain, nrounds = best$best_nrounds)
+
+prob <- predict(bst, dtest)
+pred <- as.integer(prob > 0.5)
+
+cm <- table(Predicted = pred, Observed = y_t)
+cm
+mosaicplot(cm, color = c("grey80", "steelblue"),
+           main = "XGBoost confusion matrix (validation data)")
+
+data.frame(CV_accuracy   = 1 - best$cv_error,
+           Test_accuracy = mean(pred == y_t))
 ```
 
