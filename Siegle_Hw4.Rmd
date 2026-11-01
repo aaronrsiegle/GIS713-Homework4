@@ -19,6 +19,7 @@ library(data.table)
 library(spectralGP)
 library(RColorBrewer)
 library(spgwr)
+library(caret)
 ```
 
 ```{r}
@@ -35,11 +36,11 @@ df
 ```{r}
 # Initial data cleaning
 colSums(is.na(df))
-df[is.na(Age), Age := df[, median(Age, na.rm=T)]] 
 df[, lapply(.SD, class)]
 df[, Survived := as.factor(Survived)]
 df[, Sex := as.factor(Sex)]
 df[, Embarked := as.factor(Embarked)]
+df[, Pclass := as.factor(Pclass)]
 ```
 
 
@@ -52,14 +53,19 @@ train_idx <- sample(seq_len(n), size = floor(0.80 * n))
 train_data <- df[train_idx, , drop = FALSE]
 test_data  <- df[-train_idx, , drop = FALSE]
 
+# Filling in age NAs with training data only to prevent test data leakage
+age_median <- median(train_data$Age, na.rm = TRUE)
+train_data[is.na(Age), Age := age_median]
+test_data[is.na(Age), Age := age_median]
+
 nrow(train_data)
 nrow(test_data)
 ```
 
 ```{r}
-# Question 2: We’ll first fit a baseline model that isn’t “machine learning” (according to most people). Fit a multiple regression model that predicts titanic survivorship. Report the effects, their standard errors, and the overall accuracy of the model. Note: you must do logistic regression for this because the output is alive/dead or 1/0.
+# Question 2: We’ll first fit a baseline model that isn’t “machine learning” (according to most people). Fit a multiple regression model that predicts titanic surivivorship. Report the effects, their standard errors, and the overall accuracy of the model. Note: you must do logistic regression for this because the output is alive/dead or 1/0.
 
-titanic_log <- glm(Survived ~ Pclass + Age + Fare, 
+titanic_log <- glm(Survived ~ Pclass + Age + Fare + Sex, 
                    data = train_data, 
                    family = "binomial")
 summary(titanic_log)
@@ -97,7 +103,7 @@ train_data$Survived <- as.factor(train_data$Survived)
 test_data$Survived  <- as.factor(test_data$Survived)
 
 p        <- ncol(train_data) - 1          # number of predictors
-mtry_set <- 1:min(5, p)              # mtry values to try
+mtry_set <- 1:4              # mtry values to try
 ntree    <- 1000
 
 oob_mat <- matrix(NA, nrow = ntree, ncol = length(mtry_set),
@@ -105,7 +111,7 @@ oob_mat <- matrix(NA, nrow = ntree, ncol = length(mtry_set),
 rf_list <- list()
 
 for (m in mtry_set) {
-  rf <- randomForest(Survived ~ Pclass + Age + Fare, data = train_data,
+  rf <- randomForest(Survived ~ Pclass + Age + Fare + Sex, data = train_data,
                      ntree = ntree, mtry = m, importance = TRUE)
   rf_list[[as.character(m)]] <- rf
   oob_mat[, paste0("mtry=", m)] <- rf$err.rate[, "OOB"]
@@ -139,37 +145,42 @@ best_rf
 ```
 
 ```{r, warning=FALSE}
-# Variable Importance Plots 
-plot_min_depth_distribution(best_rf)
-plot_multi_way_importance(best_rf)
+# Variable Importance Plots
+md <- min_depth_distribution(best_rf)
+plot_min_depth_distribution(md)
+imp <- measure_importance(best_rf)
+plot_multi_way_importance(imp,  
+                          x_measure = "mean_min_depth", 
+                          y_measure = "times_a_root")
 ```
 
 These plots show that the model works because it visualize how the model is influenced by the effects of a particular variable. We also see a clear negative correlation between the number of times that a variable is used to split the root node (times_a_root) and the average depth of the node closest to the root of the tree (mean_min_depth). The lower mean_min_root values indicate that a variable is more important as this variable can be used to split large portions of the dataset early on in the tree. It makes sense that the more influential variables are used by the model more often and thus are more effective as splitting the data. The trend between these factors suggests that the model is working as expected.
 
 ```{r}
 # Compare OOB error with the error on the test data
-pred     <- predict(best_rf, test_data)
-test_acc <- mean(pred == test_data$Survived)
-oob_acc  <- 1 - tail(best_rf$err.rate[, "OOB"], 1)
+pred_rf     <- predict(best_rf, test_data)
+test_acc_rf <- mean(pred_rf == test_data$Survived)
+oob_acc_rf  <- 1 - tail(best_rf$err.rate[, "OOB"], 1)
 ```
 
 ```{r}
 # Make the confusion matrix 
-table(Predicted = pred, Observed = test_data$Survived)   
-data.frame(OOB_accuracy = oob_acc, Test_accuracy = test_acc)
+table(Predicted = pred_rf, Observed = test_data$Survived)   
+data.frame(OOB_accuracy = oob_acc_rf, Test_accuracy = test_acc_rf)
 ```
 
-Yes, Breiman was right because the OOB accuracy (70.3%) is relatively close to the test accuracy (76.5%). This is because Breiman believed that the OOB accuracy is the most unbiased estimator on the accuracy of the model when applied to the testing data. Since the OOB accuracy is roughly 6 percentage points away from the test accuracy, we can argue that Breiman was right about the nature of the OOB accuracy as an unbiased estimator. 
+Yes, Breiman was right because the OOB accuracy (83.4%) is relatively close to the test accuracy (80.4%). This is because Breiman believed that the OOB accuracy is the most unbiased estimator on the accuracy of the model when applied to the testing data. Since the OOB accuracy is roughly 3 percentage points away from the test accuracy, we can argue that Breiman was right about the nature of the OOB accuracy as an unbiased estimator. 
 
 ```{r}
 # Question 4: Now fit an XGBoost model to do the same 
-predictors <- c("Pclass", "Age", "Fare")
+predictors <- c("Pclass", "Age", "Fare", "Sex")
 pclass_levels <- sort(unique(as.character(train_data$Pclass)))
 
 # Build a numeric matrix
 make_X <- function(d) {
   d <- as.data.frame(d)[, predictors]
   d$Pclass <- as.integer(factor(as.character(d$Pclass), levels = pclass_levels))
+  d$Sex    <- as.integer(as.character(d$Sex) == "male")   # female = 0, male = 1
   as.matrix(d)
 }
 
@@ -188,47 +199,50 @@ learn_rate <- c(0.1, 0.2, 0.5, 1)
 reg_param  <- c(0.1, 1, 2, 5)
 nmax       <- 1000                       # max number of boosted trees
 
-tune   <- expand.grid(eta = learn_rate, lambda = reg_param)
-curves <- matrix(NA, nrow = nmax, ncol = nrow(tune))   # CV error per round
+tune_xgb   <- expand.grid(eta = learn_rate, lambda = reg_param)
+curves_xgb <- matrix(NA, nrow = nmax, ncol = nrow(tune_xgb))   # CV error per round
 
-for (i in seq_len(nrow(tune))) {
+for (i in seq_len(nrow(tune_xgb))) {
   params <- list(objective = "binary:logistic", eval_metric = "error",
-                 eta = tune$eta[i], lambda = tune$lambda[i],
+                 eta = tune_xgb$eta[i], lambda = tune_xgb$lambda[i],
                  max_depth = 3, subsample = 0.8, colsample_bytree = 0.8,
                  min_child_weight = 1, nthread = 2)
   cv <- xgb.cv(params, dtrain, nrounds = nmax, nfold = 5, verbose = 0)
-  curves[, i] <- cv$evaluation_log$test_error_mean
+  curves_xgb[, i] <- cv$evaluation_log$test_error_mean
 }
 
-tune$best_nrounds <- apply(curves, 2, which.min)
-tune$cv_error     <- apply(curves, 2, min)
-tune[order(tune$cv_error), ]              
+tune_xgb$best_nrounds <- apply(curves_xgb, 2, which.min)
+tune_xgb$cv_error     <- apply(curves_xgb, 2, min)
+tune_xgb[order(tune_xgb$cv_error), ]  
+
+best_xgb <- tune_xgb[which.min(tune_xgb$cv_error), ]
+best_xgb
 ```
 
 ```{r}
 # CV error vs. number of trees - hold lambda constant 
-sel <- which(tune$lambda == 1)
-matplot(curves[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
+sel <- which(tune_xgb$lambda == 1)
+matplot(curves_xgb[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
         xlab = "Number of boosted trees (log scale)", ylab = "5-fold CV error",
         main = "CV error vs. trees, by eta (lambda = 1)")
-legend("topright", paste("eta =", tune$eta[sel]), col = seq_along(sel),
+legend("topright", paste("eta =", tune_xgb$eta[sel]), col = seq_along(sel),
        lty = 1, bty = "n")
 ```
 
 ```{r}
 # CV error vs. number of trees - one line per lambda (at the best eta)
-best     <- tune[which.min(tune$cv_error), ]
-sel      <- which(tune$eta == best$eta)
-matplot(curves[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
+best_xgb     <- tune_xgb[which.min(tune_xgb$cv_error), ]
+sel      <- which(tune_xgb$eta == best_xgb$eta)
+matplot(curves_xgb[, sel], type = "l", lty = 1, col = seq_along(sel), log = "x",
         xlab = "Number of boosted trees (log scale)", ylab = "5-fold CV error",
-        main = paste0("CV error vs. trees, by lambda (eta = ", best$eta, ")"))
-legend("topleft", paste("lambda =", tune$lambda[sel]), col = seq_along(sel),
+        main = paste0("CV error vs. trees, by lambda (eta = ", best_xgb$eta, ")"))
+legend("bottomleft", paste("lambda =", tune_xgb$lambda[sel]), col = seq_along(sel),
        lty = 1, bty = "n")
 ```
 
 ```{r}
 # Best CV error for every eta x lambda combination
-err_mat <- tapply(tune$cv_error, list(tune$eta, tune$lambda), identity)
+err_mat <- tapply(tune_xgb$cv_error, list(tune_xgb$eta, tune_xgb$lambda), identity)
 matplot(learn_rate, err_mat, type = "b", pch = 19, lty = 1,
         col = seq_along(reg_param),
         xlab = "eta (learning rate)", ylab = "Minimum CV error",
@@ -239,21 +253,136 @@ legend("bottomright", paste("lambda =", reg_param), col = seq_along(reg_param),
 
 ```{r}
 # Final model and accuracy 
-params_best <- list(objective = "binary:logistic", eval_metric = "error",
-                    eta = best$eta, lambda = best$lambda,
+params_best_xgb <- list(objective = "binary:logistic", eval_metric = "error",
+                    eta = best_xgb$eta, lambda = best_xgb$lambda,
                     max_depth = 3, subsample = 0.8, colsample_bytree = 0.8,
                     min_child_weight = 1, nthread = 2)
-bst <- xgb.train(params_best, dtrain, nrounds = best$best_nrounds)
+bst_xgb <- xgb.train(params_best_xgb, dtrain, nrounds = best_xgb$best_nrounds)
 
-prob <- predict(bst, dtest)
-pred <- as.integer(prob > 0.5)
+prob_xgb <- predict(bst_xgb, dtest)
+pred_xgb <- as.integer(prob_xgb > 0.5)
 
-cm <- table(Predicted = pred, Observed = y_t)
-cm
-mosaicplot(cm, color = c("grey80", "steelblue"),
+cm_xgb <- table(Predicted = pred_xgb, Observed = y_t)
+cm_xgb
+mosaicplot(cm_xgb, color = c("grey80", "steelblue"),
            main = "XGBoost confusion matrix (validation data)")
 
-data.frame(CV_accuracy   = 1 - best$cv_error,
-           Test_accuracy = mean(pred == y_t))
+data.frame(CV_accuracy   = 1 - best_xgb$cv_error,
+           Test_accuracy = mean(pred_xgb == y_t))
 ```
+
+```{r}
+# Question 5: Artificial Neural Network model to describe surivivorship 
+# Cleaning the data specifically for neural network model
+tr <- as.data.frame(train_data)[, c("Survived", "Pclass", "Age", "Fare", "Sex")]
+te <- as.data.frame(test_data)[,  c("Survived", "Pclass", "Age", "Fare", "Sex")]
+
+tr$Sex <- as.integer(as.character(tr$Sex) == "male")
+te$Sex <- as.integer(as.character(te$Sex) == "male")
+
+tr$Pclass <- as.integer(as.character(tr$Pclass))
+te$Pclass <- as.integer(as.character(te$Pclass))
+
+vars_cont <- c("Pclass", "Age", "Fare")   
+# Replacing missing values with the median from the training data
+for (v in vars_cont) {
+  med <- median(tr[[v]], na.rm = TRUE)
+  tr[[v]][is.na(tr[[v]])] <- med
+  te[[v]][is.na(te[[v]])] <- med
+}
+
+# Scaling continuous predictors using training-set mean and SD
+mu <- sapply(tr[vars_cont], mean)
+s  <- sapply(tr[vars_cont], sd)
+tr[vars_cont] <- scale(tr[vars_cont], center = mu, scale = s)
+te[vars_cont] <- scale(te[vars_cont], center = mu, scale = s)
+
+# Changing response variable to factor
+tr$Survived <- factor(tr$Survived)
+te$Survived <- factor(te$Survived, levels = levels(tr$Survived))
+```
+
+```{r}
+# Fit and tune the model 
+sizes  <- c(1, 2, 4, 8, 12, 16)              
+decays <- c(0.0001, 0.001, 0.01, 0.1, 0.5, 1)  
+tune_ann   <- expand.grid(size = sizes, decay = decays)
+
+folds <- sample(rep(1:5, length.out = nrow(tr)))   
+
+cv_error <- function(size, decay) {
+  errs <- sapply(1:5, function(k) {
+    # accidentally loaded nnet twice bc I forgot it was in caret so need to list it here twice to get it to work
+    fit  <- nnet::nnet(Survived ~ ., data = tr[folds != k, ], size = size,
+                 decay = decay, maxit = 500, trace = FALSE)
+    pred <- predict(fit, tr[folds == k, ], type = "class")
+    mean(pred != tr$Survived[folds == k])
+  })
+  mean(errs)
+}
+
+tune_ann$cv_error <- mapply(cv_error, tune_ann$size, tune_ann$decay)
+tune_ann[order(tune_ann$cv_error), ]     
+```
+
+```{r}
+# Model error matrix
+err_mat <- tapply(tune_ann$cv_error,
+                      list(tune_ann$size,
+                           tune_ann$decay), 
+                      identity)
+```
+
+```{r}
+# Graphing CV error vs size 
+matplot(sizes, err_mat, type = "b", pch = 19, lty = 1, col = seq_along(decays),
+        xlab = "Size (nodes in hidden layer)", ylab = "5-fold CV error",
+        main = "CV error vs. size, by decay")
+legend("topleft", paste("decay =", decays), col = seq_along(decays),
+       pch = 19, lty = 1, bty = "n", cex = 0.8)
+
+```
+
+```{r}
+# Graphing CV error compared to decay 
+matplot(decays, t(err_mat), type = "b", pch = 19, lty = 1, log = "x",
+        col = seq_along(sizes),
+        xlab = "Decay (log scale)", ylab = "5-fold CV error",
+        main = "CV error vs. decay, by size")
+legend("topright", paste("size =", sizes), col = seq_along(sizes),
+       pch = 19, lty = 1, bty = "n", cex = 0.8)
+
+```
+
+```{r}
+# Identifying the best model 
+best_ann <- tune_ann[which.min(tune_ann$cv_error), ]
+best_ann
+
+set.seed(42)
+ann <- nnet::nnet(Survived ~ ., data = tr,
+                  size = best_ann$size, 
+                  decay = best_ann$decay,
+            maxit = 500, trace = FALSE)
+
+ann_prob <- predict(ann, te, type = "raw")[, 1]   
+ann_pred <- factor(predict(ann, te, type = "class"), 
+                   levels = levels(tr$Survived))
+```
+
+```{r}
+# Report the accuracy of the best model 
+cm_ann <- table(Predicted = ann_pred, Observed = te$Survived)
+cm_ann
+mosaicplot(cm_ann, color = c("grey80", "steelblue"),
+           main = "ANN confusion matrix (validation data)")
+
+data.frame(CV_accuracy   = 1 - best_ann$cv_error,
+           Test_accuracy = mean(ann_pred == te$Survived),
+           Sensitivity   = cm_ann["1", "1"] / sum(cm_ann[, "1"]),   
+           Specificity   = cm_ann["0", "0"] / sum(cm_ann[, "0"]))   
+
+```
+
+
 
