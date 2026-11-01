@@ -143,7 +143,8 @@ best_rf
 plot_min_depth_distribution(best_rf)
 plot_multi_way_importance(best_rf)
 ```
-These plot show that the model works because it visualize how the model is influenced by the effects of a particular variable. We also see a clear negative correlation between the number of times that a variable is used to split the root node (times_a_root) and the average depth of the node closest to the root of the tree (mean_min_depth). The lower mean_min_root values indicate that a variable is more important as this variable can be used to split large portions of the dataset early on in the tree. It makes sense that the more influential variables are used by the model more often and thus are more effective as splitting the data. The trend between these factors suggests that the model is working as expected.
+
+These plots show that the model works because it visualize how the model is influenced by the effects of a particular variable. We also see a clear negative correlation between the number of times that a variable is used to split the root node (times_a_root) and the average depth of the node closest to the root of the tree (mean_min_depth). The lower mean_min_root values indicate that a variable is more important as this variable can be used to split large portions of the dataset early on in the tree. It makes sense that the more influential variables are used by the model more often and thus are more effective as splitting the data. The trend between these factors suggests that the model is working as expected.
 
 ```{r}
 # Compare OOB error with the error on the test data
@@ -157,6 +158,7 @@ oob_acc  <- 1 - tail(best_rf$err.rate[, "OOB"], 1)
 table(Predicted = pred, Observed = test_data$Survived)   
 data.frame(OOB_accuracy = oob_acc, Test_accuracy = test_acc)
 ```
+
 Yes, Breiman was right because the OOB accuracy (70.3%) is relatively close to the test accuracy (76.5%). This is because Breiman believed that the OOB accuracy is the most unbiased estimator on the accuracy of the model when applied to the testing data. Since the OOB accuracy is roughly 6 percentage points away from the test accuracy, we can argue that Breiman was right about the nature of the OOB accuracy as an unbiased estimator. 
 
 ```{r}
